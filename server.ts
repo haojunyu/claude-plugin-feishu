@@ -397,12 +397,16 @@ function extractPostText(content: any): string {
 
 function buildPostContent(text: string): string {
   // Build Feishu post message content for rich text (markdown) rendering
-  // Split by code blocks and format accordingly
+  // Supports: code blocks, lists, blockquotes, horizontal rules
   const lines = text.split('\n')
   const content: any[] = []
   let inCodeBlock = false
   let codeBlockLang = ''
   let codeBlockLines: string[] = []
+  let inList = false
+  let listItems: string[] = []
+  let inQuote = false
+  let quoteLines: string[] = []
 
   const flushCodeBlock = () => {
     if (codeBlockLines.length > 0) {
@@ -416,28 +420,96 @@ function buildPostContent(text: string): string {
     }
   }
 
+  const flushList = () => {
+    if (listItems.length > 0) {
+      for (const item of listItems) {
+        content.push([{ tag: 'text', text: '• ' + item }])
+      }
+      listItems = []
+      inList = false
+    }
+  }
+
+  const flushQuote = () => {
+    if (quoteLines.length > 0) {
+      const quoteText = quoteLines.join('\n')
+      content.push([{ tag: 'text', text: '「' + quoteText + '」' }])
+      quoteLines = []
+      inQuote = false
+    }
+  }
+
   for (const line of lines) {
+    // Code block handling
     const codeFenceMatch = line.match(/^```(\w*)/)
     if (codeFenceMatch && !inCodeBlock) {
+      flushList()
+      flushQuote()
       inCodeBlock = true
       codeBlockLang = codeFenceMatch[1]
+      continue
     } else if (line === '```' && inCodeBlock) {
       inCodeBlock = false
       flushCodeBlock()
+      continue
     } else if (inCodeBlock) {
       codeBlockLines.push(line)
+      continue
+    }
+
+    // Horizontal rule
+    if (line.match(/^-{3,}$/) || line.match(/^\*{3,}$/)) {
+      flushList()
+      flushQuote()
+      content.push([{ tag: 'text', text: '─────────' }])
+      continue
+    }
+
+    // Quote block
+    const quoteMatch = line.match(/^>(.*)/)
+    if (quoteMatch) {
+      flushList()
+      inQuote = true
+      quoteLines.push(quoteMatch[1].trim())
+      continue
+    } else if (inQuote && line.trim() === '') {
+      flushQuote()
+      continue
+    } else if (inQuote) {
+      flushQuote()
+    }
+
+    // List items
+    const listMatch = line.match(/^(\s*)[-*+]\s+(.+)$/)
+    const orderedListMatch = line.match(/^(\s*)\d+\.\s+(.+)$/)
+    if (listMatch || orderedListMatch) {
+      const match = listMatch || orderedListMatch!
+      const itemText = match[2]
+      inList = true
+      listItems.push(parseInlineStyles(itemText))
+    } else if (inList && line.trim() === '') {
+      flushList()
+    } else if (inList && line.match(/^(\s+)/)) {
+      // Continuation of list item
+      const lastItem = listItems.pop() || ''
+      listItems.push(lastItem + ' ' + line.trim())
     } else {
-      // Regular text line - parse inline markdown
-      const elements = parseInlineMarkdown(line)
-      if (elements.length > 0) {
-        content.push(elements)
+      flushList()
+      // Regular paragraph
+      if (line.trim()) {
+        const processed = parseInlineStyles(line)
+        content.push([{ tag: 'text', text: processed }])
+      } else {
+        // Empty line - add spacing
+        content.push([{ tag: 'text', text: '' }])
       }
     }
   }
-  // Handle unclosed code block
-  if (inCodeBlock) {
-    flushCodeBlock()
-  }
+
+  // Flush any remaining blocks
+  flushCodeBlock()
+  flushList()
+  flushQuote()
 
   return JSON.stringify({
     zh_cn: {
@@ -447,28 +519,27 @@ function buildPostContent(text: string): string {
   })
 }
 
-function parseInlineMarkdown(line: string): any[] {
-  const elements: any[] = []
-  // Simple inline parsing for bold, italic, inline code, and links
-  const regex = /(\*\*|\*|`|\[|\]\(|\n)/g
-  let lastIndex = 0
-  let buffer = ''
-  let pendingLink: { text: string; url: string } | null = null
+function parseInlineStyles(text: string): string {
+  // Parse inline markdown styles and convert to visual markers
+  // Note: Feishu post format has limited inline styling support
+  // We convert markdown markers to unicode characters or plain text equivalents
 
-  const flushBuffer = () => {
-    if (buffer) {
-      elements.push({ tag: 'text', text: buffer })
-      buffer = ''
-    }
-  }
+  let result = text
 
-  // Very basic parsing - just handle code blocks and plain text for now
-  // Full markdown parsing would be more complex
-  if (line.trim()) {
-    elements.push({ tag: 'text', text: line })
-  }
+  // Bold: **text** -> text (feishu doesn't support inline bold in post)
+  result = result.replace(/\*\*(.+?)\*\*/g, '【$1】')
 
-  return elements
+  // Italic: *text* or _text_
+  result = result.replace(/\*(.+?)\*/g, '「$1」')
+  result = result.replace(/_(.+?)_/g, '「$1」')
+
+  // Inline code: `text`
+  result = result.replace(/`(.+?)`/g, '「$1」')
+
+  // Links: [text](url) -> text (url)
+  result = result.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '$1 ($2)')
+
+  return result
 }
 
 async function downloadImage(messageId: string, imageKey: string): Promise<string | undefined> {
