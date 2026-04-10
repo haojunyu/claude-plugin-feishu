@@ -520,24 +520,30 @@ function buildPostContent(text: string): string {
 }
 
 function parseInlineStyles(text: string): string {
-  // Parse inline markdown styles and convert to visual markers
-  // Note: Feishu post format has limited inline styling support
-  // We convert markdown markers to unicode characters or plain text equivalents
-
+  // Parse inline markdown styles and convert to HTML tags that Feishu post format supports
   let result = text
 
-  // Bold: **text** -> text (feishu doesn't support inline bold in post)
-  result = result.replace(/\*\*(.+?)\*\*/g, '【$1】')
+  // Escape existing HTML first to prevent injection
+  result = result.replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
 
-  // Italic: *text* or _text_
-  result = result.replace(/\*(.+?)\*/g, '「$1」')
-  result = result.replace(/_(.+?)_/g, '「$1」')
+  // Bold: **text** -> <b>text</b>
+  result = result.replace(/&lt;b&gt;(.+?)&lt;\/b&gt;/g, '<b>$1</b>')
+  result = result.replace(/\*\*(.+?)\*\*/g, '<b>$1</b>')
 
-  // Inline code: `text`
-  result = result.replace(/`(.+?)`/g, '「$1」')
+  // Italic: *text* or _text_ -> <i>text</i>
+  result = result.replace(/\*(.+?)\*/g, '<i>$1</i>')
+  result = result.replace(/_(.+?)_/g, '<i>$1</i>')
 
-  // Links: [text](url) -> text (url)
-  result = result.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '$1 ($2)')
+  // Inline code: `text` -> <code>text</code>
+  result = result.replace(/`(.+?)`/g, '<code>$1</code>')
+
+  // Strikethrough: ~~text~~ -> <s>text</s>
+  result = result.replace(/~~(.+?)~~/g, '<s>$1</s>')
+
+  // Links: [text](url) -> <a href="url">text</a>
+  result = result.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2">$1</a>')
 
   return result
 }
