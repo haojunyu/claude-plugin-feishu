@@ -448,6 +448,7 @@ const mcp = new Server(
   {
     capabilities: { tools: {}, experimental: { 'claude/channel': {} } },
     instructions: [
+	  'CRITICAL: When you see a <channel> tag in a user message, you MUST respond using the reply tool. NEVER respond with plain text - it will not reach the sender. Always call the reply tool with the chat_id from the tag.',
       'The sender reads Feishu (飞书), not this session. Anything you want them to see must go through the reply tool — your transcript output never reaches their chat.',
       '',
       'Messages from Feishu arrive as <channel source="feishu" chat_id="..." message_id="..." user="..." ts="...">. If the tag has an image_path attribute, Read that file — it is a photo the sender attached. Reply with the reply tool — pass chat_id back. Use reply_to (set to a message_id) only when replying to an earlier message; the latest message doesn\'t need a quote-reply, omit reply_to for normal responses.',
