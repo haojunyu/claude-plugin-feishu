@@ -395,6 +395,153 @@ function extractPostText(content: any): string {
   return parts.join('\n')
 }
 
+function buildPostContent(text: string): string {
+  // Build Feishu post message content for rich text (markdown) rendering
+  // Supports: code blocks, lists, blockquotes, horizontal rules
+  const lines = text.split('\n')
+  const content: any[] = []
+  let inCodeBlock = false
+  let codeBlockLang = ''
+  let codeBlockLines: string[] = []
+  let inList = false
+  let listItems: string[] = []
+  let inQuote = false
+  let quoteLines: string[] = []
+
+  const flushCodeBlock = () => {
+    if (codeBlockLines.length > 0) {
+      content.push([{
+        tag: 'code_block',
+        language: codeBlockLang || 'plain',
+        text: codeBlockLines.join('\n'),
+      }])
+      codeBlockLines = []
+      codeBlockLang = ''
+    }
+  }
+
+  const flushList = () => {
+    if (listItems.length > 0) {
+      for (const item of listItems) {
+        content.push([{ tag: 'text', text: '• ' + item }])
+      }
+      listItems = []
+      inList = false
+    }
+  }
+
+  const flushQuote = () => {
+    if (quoteLines.length > 0) {
+      const quoteText = quoteLines.join('\n')
+      content.push([{ tag: 'text', text: '「' + quoteText + '」' }])
+      quoteLines = []
+      inQuote = false
+    }
+  }
+
+  for (const line of lines) {
+    // Code block handling
+    const codeFenceMatch = line.match(/^```(\w*)/)
+    if (codeFenceMatch && !inCodeBlock) {
+      flushList()
+      flushQuote()
+      inCodeBlock = true
+      codeBlockLang = codeFenceMatch[1]
+      continue
+    } else if (line === '```' && inCodeBlock) {
+      inCodeBlock = false
+      flushCodeBlock()
+      continue
+    } else if (inCodeBlock) {
+      codeBlockLines.push(line)
+      continue
+    }
+
+    // Horizontal rule
+    if (line.match(/^-{3,}$/) || line.match(/^\*{3,}$/)) {
+      flushList()
+      flushQuote()
+      content.push([{ tag: 'text', text: '─────────' }])
+      continue
+    }
+
+    // Quote block
+    const quoteMatch = line.match(/^>(.*)/)
+    if (quoteMatch) {
+      flushList()
+      inQuote = true
+      quoteLines.push(quoteMatch[1].trim())
+      continue
+    } else if (inQuote && line.trim() === '') {
+      flushQuote()
+      continue
+    } else if (inQuote) {
+      flushQuote()
+    }
+
+    // List items
+    const listMatch = line.match(/^(\s*)[-*+]\s+(.+)$/)
+    const orderedListMatch = line.match(/^(\s*)\d+\.\s+(.+)$/)
+    if (listMatch || orderedListMatch) {
+      const match = listMatch || orderedListMatch!
+      const itemText = match[2]
+      inList = true
+      listItems.push(parseInlineStyles(itemText))
+    } else if (inList && line.trim() === '') {
+      flushList()
+    } else if (inList && line.match(/^(\s+)/)) {
+      // Continuation of list item
+      const lastItem = listItems.pop() || ''
+      listItems.push(lastItem + ' ' + line.trim())
+    } else {
+      flushList()
+      // Regular paragraph
+      if (line.trim()) {
+        const processed = parseInlineStyles(line)
+        content.push([{ tag: 'text', text: processed }])
+      } else {
+        // Empty line - add spacing
+        content.push([{ tag: 'text', text: '' }])
+      }
+    }
+  }
+
+  // Flush any remaining blocks
+  flushCodeBlock()
+  flushList()
+  flushQuote()
+
+  return JSON.stringify({
+    zh_cn: {
+      title: '',
+      content,
+    },
+  })
+}
+
+function parseInlineStyles(text: string): string {
+  // Parse inline markdown styles and convert to visual markers
+  // Note: Feishu post format has limited inline styling support
+  // We convert markdown markers to unicode characters or plain text equivalents
+
+  let result = text
+
+  // Bold: **text** -> text (feishu doesn't support inline bold in post)
+  result = result.replace(/\*\*(.+?)\*\*/g, '【$1】')
+
+  // Italic: *text* or _text_
+  result = result.replace(/\*(.+?)\*/g, '「$1」')
+  result = result.replace(/_(.+?)_/g, '「$1」')
+
+  // Inline code: `text`
+  result = result.replace(/`(.+?)`/g, '「$1」')
+
+  // Links: [text](url) -> text (url)
+  result = result.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '$1 ($2)')
+
+  return result
+}
+
 async function downloadImage(messageId: string, imageKey: string): Promise<string | undefined> {
   try {
     const res = await client.im.v1.messageResource.get({
@@ -448,12 +595,14 @@ const mcp = new Server(
   {
     capabilities: { tools: {}, experimental: { 'claude/channel': {} } },
     instructions: [
-	  'CRITICAL: When you see a <channel> tag in a user message, you MUST respond using the reply tool. NEVER respond with plain text - it will not reach the sender. Always call the reply tool with the chat_id from the tag.',
+      'CRITICAL: When you see a <channel> tag in a user message, you MUST respond using the reply tool. NEVER respond with plain text - it will not reach the sender. Always call the reply tool with the chat_id from the tag.',
       'The sender reads Feishu (飞书), not this session. Anything you want them to see must go through the reply tool — your transcript output never reaches their chat.',
       '',
       'Messages from Feishu arrive as <channel source="feishu" chat_id="..." message_id="..." user="..." ts="...">. If the tag has an image_path attribute, Read that file — it is a photo the sender attached. Reply with the reply tool — pass chat_id back. Use reply_to (set to a message_id) only when replying to an earlier message; the latest message doesn\'t need a quote-reply, omit reply_to for normal responses.',
       '',
       'reply accepts file paths (files: ["/abs/path.png"]) for attachments. Use react to add emoji reactions (Feishu emoji names like THUMBSUP, SMILE, HEART, CLAP, etc.), and edit_message to update a message you previously sent.',
+      '',
+      '**Rich Text Support**: When replying with markdown content (code blocks, lists, formatting), set format: "markdown" in the reply tool. This renders properly in Feishu with syntax highlighting and formatting.',
       '',
       "Feishu messages arrive via WebSocket subscription. If you need earlier context, ask the user to paste it or summarize.",
       '',
@@ -481,6 +630,11 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
             type: 'array',
             items: { type: 'string' },
             description: 'Absolute file paths to attach. Images as image messages; other types as file messages. Max 30MB each.',
+          },
+          format: {
+            type: 'string',
+            enum: ['text', 'markdown'],
+            description: 'Message format. Use "markdown" for rich text with code blocks, lists, etc. Default: "text".',
           },
         },
         required: ['chat_id', 'text'],
@@ -522,6 +676,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
         const text = args.text as string
         const replyTo = args.reply_to as string | undefined
         const files = (args.files as string[] | undefined) ?? []
+        const format = (args.format as 'text' | 'markdown') ?? 'text'
 
         assertAllowedChat(chatId)
 
@@ -557,13 +712,18 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
               replyMode !== 'off' &&
               (replyMode === 'all' || i === 0)
 
+            const content = format === 'markdown'
+              ? buildPostContent(chunks[i])
+              : JSON.stringify({ text: chunks[i] })
+            const msgType = format === 'markdown' ? 'post' : 'text'
+
             let sent: any
             if (shouldReplyTo) {
               sent = await client.im.v1.message.reply({
                 path: { message_id: replyTo },
                 data: {
-                  msg_type: 'text',
-                  content: JSON.stringify({ text: chunks[i] }),
+                  msg_type: msgType,
+                  content,
                 },
               })
             } else {
@@ -571,8 +731,8 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
                 params: { receive_id_type: 'chat_id' },
                 data: {
                   receive_id: chatId,
-                  msg_type: 'text',
-                  content: JSON.stringify({ text: chunks[i] }),
+                  msg_type: msgType,
+                  content,
                 },
               })
             }
