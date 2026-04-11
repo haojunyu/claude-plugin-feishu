@@ -401,8 +401,9 @@ function formatMarkdown(text: string): string {
     r = r.replace(/\n{3,}/g, '\n\n')
 
     // 5. Strip invalid image keys (only img_xxx is valid on Feishu)
-    r = r.replace(IMAGE_RE, (full, _alt: string, value: string) =>
-      value.startsWith('img_') ? full : ''
+    // Replace with link format instead of empty string
+    r = r.replace(IMAGE_RE, (full, alt: string, value: string) =>
+      value.startsWith('img_') ? full : `[${alt || '链接'}](${value})`
     )
 
     return r
@@ -412,14 +413,15 @@ function formatMarkdown(text: string): string {
 }
 
 // Build Feishu post content from text
-// Tables are kept as-is in markdown format and rendered via md tag
+// Uses tag: 'md' to enable markdown rendering in Feishu
 function buildPostContent(text: string): any {
   const formatted = formatMarkdown(text);
+  const finalText = formatted || text;
 
   return {
     zh_cn: {
       title: '',
-      content: [[{ tag: 'md', text: formatted }]],
+      content: [[{ tag: 'md', text: finalText }]],
     },
   };
 }
@@ -575,9 +577,13 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
     switch (req.params.name) {
       case 'reply': {
         const chatId = args.chat_id as string
-        const text = args.text as string
-        const replyTo = args.reply_to as string | undefined
+        const text = (args.text ?? args.content ?? args.message) as string
+        const replyTo = (args.reply_to ?? args.reply_to_message_id) as string | undefined
         const files = (args.files as string[] | undefined) ?? []
+
+        // Debug: log what was received
+        process.stderr.write(`[reply tool] received args: chat_id=${JSON.stringify(chatId)}, text=${JSON.stringify(text)}, reply_to=${JSON.stringify(replyTo)}, files=${JSON.stringify(files)}\n`)
+        process.stderr.write(`[reply tool] text type: ${typeof text}, text length: ${text?.length ?? 'N/A'}\n`)
 
         assertAllowedChat(chatId)
 
@@ -604,7 +610,11 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
         const mode = access.chunkMode ?? 'length'
         const replyMode = access.replyToMode ?? 'first'
         const safeText = text ?? ''
-        const chunks = chunk(safeText, limit, mode)
+
+        // Skip empty text - only send files if present
+        const trimmedText = safeText.trim()
+        const hasText = trimmedText.length > 0
+        const chunks = hasText ? chunk(trimmedText, limit, mode) : []
         const sentIds: string[] = []
 
         try {
@@ -699,9 +709,11 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
         }
 
         const result =
-          sentIds.length === 1
-            ? `sent (id: ${sentIds[0]})`
-            : `sent ${sentIds.length} parts (ids: ${sentIds.join(', ')})`
+          sentIds.length === 0
+            ? 'no content to send'
+            : sentIds.length === 1
+              ? `sent (id: ${sentIds[0]})`
+              : `sent ${sentIds.length} parts (ids: ${sentIds.join(', ')})`
         return { content: [{ type: 'text', text: result }] }
       }
 
