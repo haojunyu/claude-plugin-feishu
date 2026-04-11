@@ -369,6 +369,62 @@ function chunk(text: string, limit: number, mode: 'length' | 'newline'): string[
   return out
 }
 
+// --- Markdown formatting for Feishu ---
+
+// Feishu's post+md renderer has quirks: H1-H3 don't render well, code blocks
+// need explicit spacing, and invalid image keys cause errors.
+
+const IMAGE_RE = /!\[([^\]]*)\]\(([^)\s]+)\)/g;
+
+function formatMarkdown(text: string): string {
+  try {
+    // 1. Protect code blocks
+    const mark = '___CB_'
+    const blocks: string[] = []
+    let r = text.replace(/(^|\n)(`{3,})([^\n]*)\n[\s\S]*?\n\2(?=\n|$)/g, (m, prefix = '') => {
+      const block = m.slice(String(prefix).length)
+      return `${prefix}${mark}${blocks.push(block) - 1}___`
+    })
+
+    // 2. Heading demotion: H1→H4, H2-H3→H5 (Feishu only renders H4-H6 well)
+    if (/^#{1,3} /m.test(text)) {
+      r = r.replace(/^#{2,6} (.+)$/gm, '##### $1')
+      r = r.replace(/^# (.+)$/gm, '#### $1')
+    }
+
+    // 3. <br> padding around code blocks
+    blocks.forEach((block, i) => {
+      r = r.replace(`${mark}${i}___`, `\n<br>\n${block}\n<br>\n`)
+    })
+
+    // 4. Compress excess newlines (3+ → 2)
+    r = r.replace(/\n{3,}/g, '\n\n')
+
+    // 5. Strip invalid image keys (only img_xxx is valid on Feishu)
+    r = r.replace(IMAGE_RE, (full, _alt: string, value: string) =>
+      value.startsWith('img_') ? full : ''
+    )
+
+    return r
+  } catch {
+    return text
+  }
+}
+
+// Build Feishu post content from text
+// Tables are kept as-is in markdown format and rendered via md tag
+function buildPostContent(text: string): any {
+  const formatted = formatMarkdown(text);
+
+  return {
+    zh_cn: {
+      title: '',
+      content: [[{ tag: 'md', text: formatted }]],
+    },
+  };
+}
+
+
 // --- Message content helpers ---
 
 function extractPostText(content: any): string {
@@ -467,7 +523,7 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
     {
       name: 'reply',
       description:
-        'Reply on Feishu. Pass chat_id from the inbound message. Optionally pass reply_to (message_id) for threading, and files (absolute paths) to attach images or documents.',
+        'Reply on Feishu. Pass chat_id from the inbound message. Text supports markdown (headings, code blocks, bold, lists, etc.). Optionally pass reply_to (message_id) for threading, and files (absolute paths) to attach images or documents.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -547,7 +603,8 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
         const limit = Math.max(1, Math.min(access.textChunkLimit ?? MAX_CHUNK_LIMIT, MAX_CHUNK_LIMIT))
         const mode = access.chunkMode ?? 'length'
         const replyMode = access.replyToMode ?? 'first'
-        const chunks = chunk(text, limit, mode)
+        const safeText = text ?? ''
+        const chunks = chunk(safeText, limit, mode)
         const sentIds: string[] = []
 
         try {
@@ -557,13 +614,16 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
               replyMode !== 'off' &&
               (replyMode === 'all' || i === 0)
 
+            // Parse content for tables and build mixed post content
+            const postContent = JSON.stringify(buildPostContent(chunks[i]))
+
             let sent: any
             if (shouldReplyTo) {
               sent = await client.im.v1.message.reply({
                 path: { message_id: replyTo },
                 data: {
-                  msg_type: 'text',
-                  content: JSON.stringify({ text: chunks[i] }),
+                  msg_type: 'post',
+                  content: postContent,
                 },
               })
             } else {
@@ -571,8 +631,8 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
                 params: { receive_id_type: 'chat_id' },
                 data: {
                   receive_id: chatId,
-                  msg_type: 'text',
-                  content: JSON.stringify({ text: chunks[i] }),
+                  msg_type: 'post',
+                  content: postContent,
                 },
               })
             }
@@ -656,13 +716,16 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
       }
 
       case 'edit_message': {
+        // Parse content for tables and build mixed post content
+        const postContent = JSON.stringify(buildPostContent(args.text as string))
+
         // message.update() is for text/rich-text edits (PUT, requires msg_type);
         // message.patch() is for card updates only.
         await client.im.v1.message.update({
           path: { message_id: args.message_id as string },
           data: {
-            msg_type: 'text',
-            content: JSON.stringify({ text: args.text as string }),
+            msg_type: 'post',
+            content: postContent,
           },
         })
         return { content: [{ type: 'text', text: `edited (id: ${args.message_id})` }] }
