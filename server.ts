@@ -411,6 +411,20 @@ function formatMarkdown(text: string): string {
   }
 }
 
+// Build Feishu post content from text
+// Tables are kept as-is in markdown format and rendered via md tag
+function buildPostContent(text: string): any {
+  const formatted = formatMarkdown(text);
+
+  return {
+    zh_cn: {
+      title: '',
+      content: [[{ tag: 'md', text: formatted }]],
+    },
+  };
+}
+
+
 // --- Message content helpers ---
 
 function extractPostText(content: any): string {
@@ -589,7 +603,8 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
         const limit = Math.max(1, Math.min(access.textChunkLimit ?? MAX_CHUNK_LIMIT, MAX_CHUNK_LIMIT))
         const mode = access.chunkMode ?? 'length'
         const replyMode = access.replyToMode ?? 'first'
-        const chunks = chunk(text, limit, mode)
+        const safeText = text ?? ''
+        const chunks = chunk(safeText, limit, mode)
         const sentIds: string[] = []
 
         try {
@@ -599,10 +614,8 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
               replyMode !== 'off' &&
               (replyMode === 'all' || i === 0)
 
-            const formatted = formatMarkdown(chunks[i])
-            const postContent = JSON.stringify({
-              zh_cn: { content: [[{ tag: 'md', text: formatted }]] },
-            })
+            // Parse content for tables and build mixed post content
+            const postContent = JSON.stringify(buildPostContent(chunks[i]))
 
             let sent: any
             if (shouldReplyTo) {
@@ -703,15 +716,16 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
       }
 
       case 'edit_message': {
+        // Parse content for tables and build mixed post content
+        const postContent = JSON.stringify(buildPostContent(args.text as string))
+
         // message.update() is for text/rich-text edits (PUT, requires msg_type);
         // message.patch() is for card updates only.
         await client.im.v1.message.update({
           path: { message_id: args.message_id as string },
           data: {
             msg_type: 'post',
-            content: JSON.stringify({
-              zh_cn: { content: [[{ tag: 'md', text: formatMarkdown(args.text as string) }]] },
-            }),
+            content: postContent,
           },
         })
         return { content: [{ type: 'text', text: `edited (id: ${args.message_id})` }] }
